@@ -68,17 +68,14 @@ Motion Tracker 的数据只经 OpenXR 的 `XR_BD_body_tracking` 扩展暴露，�
 
 ### 1. 启动 PC 端服务
 
-服务在另一个目录：`../VR/server.py`
-
 ```powershell
-cd ..\VR
+cd pc
+pip install -r requirements.txt
 python server.py
 ```
 
-**必须用 HTTP 模式启动**（不要带 `--cert/--key`）——
-APK 走的是明文 `ws://`，Android 不接受自签名证书的 `wss://`。
-
-记下本机局域网 IP（例：`192.168.137.63`），并确保 8000 端口的入站防火墙规则已放行。
+服务只跑 HTTP（APK 走明文 `ws://`）。记下本机局域网 IP，并确保 8000 端口的入站防火墙规则已放行。
+详见 [pc/README.md](pc/README.md)。
 
 ### 2. 构建并安装
 
@@ -552,5 +549,5 @@ PicoBridge/
 └─ app/build.gradle.kts                注意 ndkVersion / cmake version 要与本机一致
 ```
 
-配套的 PC 端（本仓库不含）：`server.py`（桥接服务）、`check_body.py`（字段自检）、
-`example_consumer.py`（消费示例）、`static/monitor.html`（实时面板）。
+PC 端在 [`pc/`](pc/)：`server.py`（桥接服务）、`static/monitor.html`（实时面板 + 骨架可视化）、
+`example_consumer.py`（消费示例）、`check_body.py`（字段自检）。用法见 [pc/README.md](pc/README.md)。

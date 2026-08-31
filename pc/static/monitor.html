@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VR 数据监控</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      font: 14px/1.5 system-ui, sans-serif;
+      background: #14161a;
+      color: #e6e6e6;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      font-size: 18px;
+      margin: 0 12px 0 0;
+    }
+
+    .badge {
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: #23272e;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .badge.ok {
+      background: #14532d;
+      color: #86efac;
+    }
+
+    .badge.bad {
+      background: #4c1d1d;
+      color: #fca5a5;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      background: #1b1e24;
+      border: 1px solid #2a2f37;
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+
+    .card h2 {
+      font-size: 14px;
+      margin: 0 0 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #skeleton {
+      width: 100%;
+      max-width: 900px;
+      aspect-ratio: 900 / 460;
+      height: auto;
+      border-radius: 10px;
+      background: #0d0f12;
+      touch-action: none;
+      cursor: grab;
+      display: block;
+      margin: 4px 0 6px;
+    }
+
+    #skeleton:active { cursor: grabbing; }
+
+    .hint {
+      margin: 0 0 10px;
+      font-size: 12px;
+      color: #6b7482;
+    }
+
+    .tracker-panel {
+      grid-column: 1 / -1;
+    }
+
+    .tracker-summary {
+      margin: -3px 0 8px;
+      color: #8b95a3;
+      font-size: 12px;
+    }
+
+    .tracker-source {
+      display: grid;
+      grid-template-columns: minmax(190px, 0.7fr) minmax(250px, 1fr) minmax(280px, 1.2fr);
+      gap: 12px;
+      align-items: start;
+      padding: 10px 0;
+      border-top: 1px solid #2a2f37;
+    }
+
+    .tracker-source h3 {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 4px;
+      font-size: 13px;
+    }
+
+    .tracker-source p {
+      margin: 2px 0;
+      color: #8b95a3;
+      font: 11px/1.4 ui-monospace, Consolas, monospace;
+      overflow-wrap: anywhere;
+    }
+
+    .tracker-source .row {
+      grid-template-columns: 78px 1fr;
+      margin: 0 0 5px;
+    }
+
+    .tracker-source code {
+      grid-column: 2;
+    }
+
+    .empty {
+      margin: 0;
+      padding-top: 10px;
+      border-top: 1px solid #2a2f37;
+      color: #6b7480;
+      font-size: 12px;
+    }
+
+    @media (max-width: 840px) {
+      .tracker-source {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #555;
+    }
+
+    .dot.on {
+      background: #4ade80;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 86px 1fr auto;
+      align-items: center;
+      gap: 8px;
+      margin: 5px 0;
+    }
+
+    label {
+      color: #8b95a3;
+      font-size: 12px;
+    }
+
+    code {
+      font: 12px/1.4 ui-monospace, Consolas, monospace;
+      white-space: pre;
+      color: #cfe3ff;
+      grid-column: 2 / 4;
+    }
+
+    .bar {
+      height: 8px;
+      background: #2a2f37;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bar i {
+      display: block;
+      height: 100%;
+      width: 0;
+      background: #3b82f6;
+    }
+
+    .val {
+      font: 12px ui-monospace, Consolas, monospace;
+      color: #9fb4d0;
+      min-width: 34px;
+      text-align: right;
+    }
+
+    .btns {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .chip {
+      padding: 2px 9px;
+      border-radius: 5px;
+      background: #2a2f37;
+      color: #6b7480;
+      font-size: 12px;
+    }
+
+    .chip.on {
+      background: #1d4ed8;
+      color: #fff;
+    }
+
+    button {
+      margin-top: 10px;
+      padding: 6px 14px;
+      border: 0;
+      border-radius: 6px;
+      background: #2f6feb;
+      color: #fff;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    details {
+      margin-top: 16px;
+    }
+
+    pre {
+      background: #0d0f12;
+      padding: 12px;
+      border-radius: 8px;
+      max-height: 40vh;
+      overflow: auto;
+      font-size: 11px;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>VR 数据监控</h1>
+    <span class="badge" id="conn">连接中…</span>
+    <span class="badge" id="hz">-- Hz</span>
+    <span class="badge" id="seq">seq --</span>
+    <span class="badge" id="sess">未进入 VR</span>
+    <span class="badge" id="bodyStatus">动捕 --</span>
+    <span class="badge" id="jointCount">关节 0</span>
+  </header>
+
+  <div class="grid">
+    <section class="card" data-part="head">
+      <h2><span class="dot" data-f="dot"></span>头显</h2>
+      <div class="row"><label>position</label><code data-f="pos">—</code></div>
+      <div class="row"><label>quaternion</label><code data-f="quat">—</code></div>
+    </section>
+
+    <section class="card" data-part="left">
+      <h2><span class="dot" data-f="dot"></span>左手柄</h2>
+      <div class="row"><label>position</label><code data-f="pos">—</code></div>
+      <div class="row"><label>quaternion</label><code data-f="quat">—</code></div>
+      <div class="row"><label>trigger</label>
+        <div class="bar"><i data-f="triggerBar"></i></div><span class="val" data-f="trigger">0.00</span>
+      </div>
+      <div class="row"><label>squeeze</label>
+        <div class="bar"><i data-f="squeezeBar"></i></div><span class="val" data-f="squeeze">0.00</span>
+      </div>
+      <div class="row"><label>thumbstick</label><code data-f="stick">—</code></div>
+      <div class="btns" data-f="chips"></div>
+      <button data-haptic="left">震动测试</button>
+    </section>
+
+    <section class="card" data-part="right">
+      <h2><span class="dot" data-f="dot"></span>右手柄</h2>
+      <div class="row"><label>position</label><code data-f="pos">—</code></div>
+      <div class="row"><label>quaternion</label><code data-f="quat">—</code></div>
+      <div class="row"><label>trigger</label>
+        <div class="bar"><i data-f="triggerBar"></i></div><span class="val" data-f="trigger">0.00</span>
+      </div>
+      <div class="row"><label>squeeze</label>
+        <div class="bar"><i data-f="squeezeBar"></i></div><span class="val" data-f="squeeze">0.00</span>
+      </div>
+      <div class="row"><label>thumbstick</label><code data-f="stick">—</code></div>
+      <div class="btns" data-f="chips"></div>
+      <button data-haptic="right">震动测试</button>
+    </section>
+
+    <section class="card tracker-panel">
+      <h2><span class="dot" id="bodyDot"></span>全身动捕（24 关节）</h2>
+      <p class="tracker-summary" id="bodySummary">等待动捕数据</p>
+      <canvas id="skeleton" width="900" height="460"></canvas>
+      <p class="hint">拖拽旋转视角，滚轮缩放，双击复位</p>
+      <details>
+        <summary>关节数值</summary>
+        <div id="jointList"></div>
+      </details>
+      <p class="empty" id="bodyEmpty">尚未收到关节位姿</p>
+    </section>
+  </div>
+
+  <details>
+    <summary>原始 JSON</summary>
+    <pre id="raw">—</pre>
+  </details>
+
+  <script>
+    const token = new URLSearchParams(location.search).get('token');
+    const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+    const connEl = document.getElementById('conn');
+    const hzEl = document.getElementById('hz');
+    const seqEl = document.getElementById('seq');
+    const sessEl = document.getElementById('sess');
+    const rawEl = document.getElementById('raw');
+    const bodyStatusEl = document.getElementById('bodyStatus');
+    const jointCountEl = document.getElementById('jointCount');
+    const bodyDotEl = document.getElementById('bodyDot');
+    const bodySummaryEl = document.getElementById('bodySummary');
+    const jointListEl = document.getElementById('jointList');
+    const bodyEmptyEl = document.getElementById('bodyEmpty');
+    const jointRows = new Map();
+
+    const cards = {};
+    for (const el of document.querySelectorAll('[data-part]')) {
+      const fields = {};
+      for (const n of el.querySelectorAll('[data-f]')) fields[n.dataset.f] = n;
+      cards[el.dataset.part] = fields;
+    }
+
+    const fmt = (a, n = 3) => Array.isArray(a)
+      ? a.map(v => (v < 0 ? '' : ' ') + v.toFixed(n)).join('  ')
+      : '—';
+
+    const CHIPS = [
+      ['a_x', 'A/X'], ['b_y', 'B/Y'], ['thumbstick_pressed', '摇杆按下'],
+    ];
+
+    function renderHand(key, d) {
+      const c = cards[key];
+      const on = !!(d && d.grip);
+      c.dot.classList.toggle('on', on);
+      c.pos.textContent = on ? fmt(d.grip.position) : '—';
+      c.quat.textContent = on ? fmt(d.grip.orientation) : '—';
+      const b = (d && d.buttons) || {};
+      for (const k of ['trigger', 'squeeze']) {
+        const v = b[k] || 0;
+        c[k].textContent = v.toFixed(2);
+        c[k + 'Bar'].style.width = (v * 100) + '%';
+      }
+      c.stick.textContent = d && d.thumbstick ? fmt(d.thumbstick, 2) : '—';
+      if (c.chips.childElementCount !== CHIPS.length) {
+        c.chips.innerHTML = CHIPS.map(([, label]) => `<span class="chip">${label}</span>`).join('');
+      }
+      CHIPS.forEach(([k], i) => c.chips.children[i].classList.toggle('on', !!b[k]));
+    }
+
+    // SMPL 骨架树，与 native 侧 kBodyParent 一致
+    const BODY_ORDER = [
+      'PELVIS', 'LEFT_HIP', 'RIGHT_HIP', 'SPINE1', 'LEFT_KNEE', 'RIGHT_KNEE',
+      'SPINE2', 'LEFT_ANKLE', 'RIGHT_ANKLE', 'SPINE3', 'LEFT_FOOT', 'RIGHT_FOOT',
+      'NECK', 'LEFT_COLLAR', 'RIGHT_COLLAR', 'HEAD', 'LEFT_SHOULDER', 'RIGHT_SHOULDER',
+      'LEFT_ELBOW', 'RIGHT_ELBOW', 'LEFT_WRIST', 'RIGHT_WRIST', 'LEFT_HAND', 'RIGHT_HAND'];
+    const BODY_PARENT = [-1, 0, 0, 3, 1, 2, 6, 4, 5, 9, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19, 20, 21];
+
+    const skCanvas = document.getElementById('skeleton');
+    const skCtx = skCanvas.getContext('2d');
+    const view = {az: 0.6, el: 0.25, zoom: 1, dragging: false, lx: 0, ly: 0};
+
+    skCanvas.addEventListener('pointerdown', e => {
+      view.dragging = true;
+      view.lx = e.clientX;
+      view.ly = e.clientY;
+      skCanvas.setPointerCapture(e.pointerId);
+    });
+    skCanvas.addEventListener('pointermove', e => {
+      if (!view.dragging) return;
+      view.az += (e.clientX - view.lx) * 0.01;
+      view.el = Math.max(-1.4, Math.min(1.4, view.el + (e.clientY - view.ly) * 0.01));
+      view.lx = e.clientX;
+      view.ly = e.clientY;
+    });
+    skCanvas.addEventListener('pointerup', e => {
+      view.dragging = false;
+      skCanvas.releasePointerCapture(e.pointerId);
+    });
+    skCanvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      view.zoom = Math.max(0.3, Math.min(4, view.zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
+    }, {passive: false});
+    skCanvas.addEventListener('dblclick', () => {
+      Object.assign(view, {az: 0.6, el: 0.25, zoom: 1});
+    });
+
+    function drawSkeleton(d) {
+      const w = skCanvas.width, h = skCanvas.height;
+      skCtx.fillStyle = '#0d0f12';
+      skCtx.fillRect(0, 0, w, h);
+
+      const joints = d.body?.joints;
+      if (!joints) return;
+      const pts = BODY_ORDER.map(n => joints[n]?.position ?? null);
+      const valid = pts.filter(Boolean);
+      if (!valid.length) return;
+
+      // 以骨架自身包围盒定标，避免参考空间原点偏移影响构图
+      let cx = 0, cy = 0, cz = 0;
+      for (const p of valid) { cx += p[0]; cy += p[1]; cz += p[2]; }
+      cx /= valid.length; cy /= valid.length; cz /= valid.length;
+      let span = 0;
+      for (const p of valid) {
+        span = Math.max(span, Math.abs(p[0] - cx), Math.abs(p[1] - cy), Math.abs(p[2] - cz));
+      }
+      const scale = (Math.min(w, h) * 0.42 / Math.max(span, 0.3)) * view.zoom;
+
+      const ca = Math.cos(view.az), sa = Math.sin(view.az);
+      const ce = Math.cos(view.el), se = Math.sin(view.el);
+      const project = p => {
+        const x = p[0] - cx, y = p[1] - cy, z = p[2] - cz;
+        const rx = x * ca + z * sa;          // 绕 Y 轴
+        const rz = -x * sa + z * ca;
+        const ry = y * ce - rz * se;         // 绕 X 轴
+        return [w / 2 + rx * scale, h / 2 - ry * scale, rz * ce + y * se];
+      };
+      const screen = pts.map(p => p ? project(p) : null);
+
+      // 地面参考线：骨架最低点所在的水平面
+      const groundY = Math.min(...valid.map(p => p[1]));
+      skCtx.strokeStyle = '#1e2530';
+      skCtx.lineWidth = 1;
+      for (let i = -3; i <= 3; i++) {
+        for (const [a, b] of [
+          [[cx + i * 0.3, groundY, cz - 0.9], [cx + i * 0.3, groundY, cz + 0.9]],
+          [[cx - 0.9, groundY, cz + i * 0.3], [cx + 0.9, groundY, cz + i * 0.3]]]) {
+          const pa = project(a), pb = project(b);
+          skCtx.beginPath();
+          skCtx.moveTo(pa[0], pa[1]);
+          skCtx.lineTo(pb[0], pb[1]);
+          skCtx.stroke();
+        }
+      }
+
+      for (let i = 0; i < BODY_PARENT.length; i++) {
+        const parent = BODY_PARENT[i];
+        if (parent < 0 || !screen[i] || !screen[parent]) continue;
+        const name = BODY_ORDER[i];
+        skCtx.strokeStyle = name.startsWith('LEFT_') ? '#4da3ff'
+          : name.startsWith('RIGHT_') ? '#ff8a5c' : '#8be08b';
+        skCtx.lineWidth = 3;
+        skCtx.beginPath();
+        skCtx.moveTo(screen[parent][0], screen[parent][1]);
+        skCtx.lineTo(screen[i][0], screen[i][1]);
+        skCtx.stroke();
+      }
+
+      for (let i = 0; i < screen.length; i++) {
+        if (!screen[i]) continue;
+        skCtx.fillStyle = joints[BODY_ORDER[i]]?.position_valid ? '#e8eef7' : '#6b7482';
+        skCtx.beginPath();
+        skCtx.arc(screen[i][0], screen[i][1], BODY_ORDER[i] === 'HEAD' ? 7 : 4, 0, Math.PI * 2);
+        skCtx.fill();
+      }
+    }
+
+    function createJointRow() {
+      const row = document.createElement('div');
+      row.className = 'tracker-source';
+      row.innerHTML = `
+        <div>
+          <h3><span class="dot" data-f="dot"></span><span data-f="id"></span></h3>
+        </div>
+        <div>
+          <div class="row"><label>position</label><code data-f="pos">—</code></div>
+        </div>
+        <div>
+          <div class="row"><label>quaternion</label><code data-f="quat">—</code></div>
+        </div>`;
+      const fields = {};
+      for (const el of row.querySelectorAll('[data-f]')) fields[el.dataset.f] = el;
+      row._fields = fields;
+      return row;
+    }
+
+    // PICO 已把 5 个 Motion Tracker 融合成骨架，不再单独暴露每个 tracker 的位姿
+    const BODY_STATUS = {0: '未启动', 1: '仅上半身', 2: '全身追踪'};
+
+    function renderBody(d) {
+      const body = d.body;
+      const joints = body && body.joints ? body.joints : null;
+      const names = joints ? Object.keys(joints) : [];
+
+      jointCountEl.textContent = '关节 ' + names.length;
+      jointCountEl.className = 'badge ' + (names.length ? 'ok' : '');
+      bodyDotEl.classList.toggle('on', names.length > 0);
+
+      if (!body) {
+        bodyStatusEl.textContent = '动捕 --';
+        bodyStatusEl.className = 'badge';
+        bodySummaryEl.textContent = '等待动捕数据';
+      } else {
+        const label = BODY_STATUS[body.status] ?? ('status ' + body.status);
+        bodyStatusEl.textContent = label;
+        bodyStatusEl.className = 'badge ' + (body.all_tracked ? 'ok' : 'bad');
+        bodySummaryEl.textContent =
+          `${label}；关节 ${body.joint_count ?? names.length} 个，`
+          + `all_tracked=${body.all_tracked}`
+          + (body.message ? `；${body.message}` : '');
+      }
+
+      for (const name of names) {
+        let row = jointRows.get(name);
+        if (!row) {
+          row = createJointRow();
+          jointRows.set(name, row);
+          jointListEl.appendChild(row);
+        }
+        const f = row._fields;
+        const j = joints[name];
+        f.dot.classList.toggle('on', !!j.position_valid);
+        f.id.textContent = name;
+        f.pos.textContent = fmt(j.position);
+        f.quat.textContent = fmt(j.orientation);
+      }
+
+      for (const [name, row] of jointRows) {
+        if (names.includes(name)) continue;
+        row.remove();
+        jointRows.delete(name);
+      }
+      bodyEmptyEl.hidden = names.length > 0;
+    }
+
+    let latest = null, frames = 0;
+
+    function render() {
+      requestAnimationFrame(render);
+      if (!latest) return;
+      const d = latest;
+      seqEl.textContent = 'seq ' + d.seq;
+      sessEl.textContent = d.session_active ? 'VR 会话进行中' : '未进入 VR';
+      sessEl.className = 'badge ' + (d.session_active ? 'ok' : '');
+      const h = cards.head;
+      h.dot.classList.toggle('on', !!d.head);
+      h.pos.textContent = d.head ? fmt(d.head.position) : '—';
+      h.quat.textContent = d.head ? fmt(d.head.orientation) : '—';
+      renderHand('left', d.left);
+      renderHand('right', d.right);
+      renderBody(d);
+      drawSkeleton(d);
+      rawEl.textContent = JSON.stringify(d, null, 1);
+    }
+    render();
+
+    setInterval(() => {
+      hzEl.textContent = frames + ' Hz';
+      frames = 0;
+    }, 1000);
+
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/ws/subscribe${qs}`);
+      ws.onopen = () => { connEl.textContent = '已连接'; connEl.className = 'badge ok'; };
+      ws.onmessage = (e) => { latest = JSON.parse(e.data); frames++; };
+      ws.onclose = () => {
+        connEl.textContent = '断开，重连中…';
+        connEl.className = 'badge bad';
+        setTimeout(connect, 1000);
+      };
+    }
+    connect();
+
+    for (const btn of document.querySelectorAll('[data-haptic]')) {
+      btn.onclick = () => fetch('/haptic' + qs, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hand: btn.dataset.haptic, intensity: 0.8, duration: 150 }),
+      });
+    }
+  </script>
+</body>
+
+</html>

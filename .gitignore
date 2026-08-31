@@ -8,3 +8,8 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# PC 端：自签证书是本地生成的，私钥绝不入库
+pc/*.pem
+__pycache__/
+*.pyc
