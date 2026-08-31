@@ -23,6 +23,8 @@
             android:name="pvr.app.type"
             android:value="vr" />
 
+        <!-- 只能有这一个 activity：PICO 会把包内的 activity 都标成 isVrActivity，
+             多声明一个会让它选不出启动项，表现为「Activity class does not exist」 -->
         <activity
             android:name="android.app.NativeActivity"
             android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode|density"

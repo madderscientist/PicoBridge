@@ -1,6 +1,7 @@
 #include "ws_client.h"
 
 #include <android/log.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -8,6 +9,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 
@@ -15,6 +17,33 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "PicoBridge/ws", __VA_ARGS__)
 
 namespace {
+
+// 阻塞式 connect 对不可达地址要等满 TCP SYN 重试（约 2 分钟），必须自己控超时
+int connectWithTimeout(addrinfo *ai, int timeoutMs) {
+    int fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (fd < 0) return -1;
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (::connect(fd, ai->ai_addr, ai->ai_addrlen) != 0) {
+        if (errno != EINPROGRESS) {
+            ::close(fd);
+            return -1;
+        }
+        pollfd pfd{fd, POLLOUT, 0};
+        if (::poll(&pfd, 1, timeoutMs) <= 0) {
+            ::close(fd);
+            return -1;
+        }
+        int err = 0;
+        socklen_t len = sizeof(err);
+        if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) {
+            ::close(fd);
+            return -1;
+        }
+    }
+    ::fcntl(fd, F_SETFL, flags);
+    return fd;
+}
 
 const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -58,7 +87,10 @@ WsClient::~WsClient() { stop(); }
 
 void WsClient::start(std::string url) {
     if (running_.exchange(true)) return;
-    url_ = std::move(url);
+    {
+        std::lock_guard<std::mutex> lock(urlMtx_);
+        url_ = std::move(url);
+    }
     rngState_ ^= static_cast<uint32_t>(
         std::chrono::steady_clock::now().time_since_epoch().count());
     thread_ = std::thread(&WsClient::run, this);
@@ -67,13 +99,31 @@ void WsClient::start(std::string url) {
 void WsClient::stop() {
     if (!running_.exchange(false)) return;
     cv_.notify_all();
+    breakSocket();
     if (thread_.joinable()) thread_.join();
 }
 
-void WsClient::send(std::string text) {
+void WsClient::setUrl(std::string url) {
+    {
+        std::lock_guard<std::mutex> lock(urlMtx_);
+        if (url == url_) return;
+        url_ = std::move(url);
+    }
+    urlDirty_.store(true);
+    cv_.notify_all();
+    breakSocket();
+}
+
+// 从外部线程打断阻塞中的 socket，让工作线程立刻跳出当前连接
+void WsClient::breakSocket() {
+    const int f = fd_.load();
+    if (f >= 0) ::shutdown(f, SHUT_RDWR);
+}
+
+void WsClient::send(const std::string &text) {
     {
         std::lock_guard<std::mutex> lock(mtx_);
-        pending_ = std::move(text);
+        pending_ = text;
         hasPending_ = true;
     }
     cv_.notify_one();
@@ -125,8 +175,8 @@ bool WsClient::handshake(int fd, const std::string &host, const std::string &por
 }
 
 bool WsClient::sendFrame(int fd, uint8_t opcode, const std::string &payload) {
-    std::string frame;
-    frame.reserve(payload.size() + 14);
+    std::string &frame = frameBuf_;
+    frame.clear();
     frame += static_cast<char>(0x80 | opcode);  // FIN
 
     const size_t len = payload.size();
@@ -204,15 +254,22 @@ bool WsClient::pumpIncoming(int fd) {
 }
 
 void WsClient::run() {
-    std::string host, port, path;
-    if (!parseUrl(url_, host, port, path)) {
-        LOGW("bad url: %s", url_.c_str());
-        running_ = false;
-        return;
-    }
-    LOGI("target ws://%s:%s%s", host.c_str(), port.c_str(), path.c_str());
-
     while (running_.load()) {
+        std::string url;
+        {
+            std::lock_guard<std::mutex> lock(urlMtx_);
+            url = url_;
+        }
+        urlDirty_.store(false);
+
+        std::string host, port, path;
+        if (!parseUrl(url, host, port, path)) {
+            LOGW("bad url: %s", url.c_str());
+            waitBeforeRetry();
+            continue;
+        }
+        LOGI("target ws://%s:%s%s", host.c_str(), port.c_str(), path.c_str());
+
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
@@ -220,53 +277,65 @@ void WsClient::run() {
         int fd = -1;
 
         if (::getaddrinfo(host.c_str(), port.c_str(), &hints, &res) == 0) {
-            for (addrinfo *ai = res; ai != nullptr; ai = ai->ai_next) {
-                fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-                if (fd < 0) continue;
-                if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
-                ::close(fd);
-                fd = -1;
+            for (addrinfo *ai = res; ai != nullptr && fd < 0; ai = ai->ai_next) {
+                fd = connectWithTimeout(ai, 3000);
             }
             ::freeaddrinfo(res);
         }
 
         if (fd < 0) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            waitBeforeRetry();
             continue;
         }
 
         int one = 1;
         ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        timeval tv{3, 0};  // 握手读不到响应时的保底，避免永久卡在 recv
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         rbuf_.clear();
+        fd_.store(fd);
 
         if (!handshake(fd, host, port, path)) {
             LOGW("handshake failed");
+            fd_.store(-1);
             ::close(fd);
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            waitBeforeRetry();
             continue;
         }
 
         LOGI("connected");
         connected_ = true;
 
-        while (running_.load()) {
-            std::string frame;
+        while (running_.load() && !urlDirty_.load()) {
+            bool hasFrame = false;
             {
                 std::unique_lock<std::mutex> lock(mtx_);
-                cv_.wait_for(lock, std::chrono::milliseconds(20),
-                             [this] { return hasPending_ || !running_.load(); });
+                cv_.wait_for(lock, std::chrono::milliseconds(20), [this] {
+                    return hasPending_ || !running_.load() || urlDirty_.load();
+                });
                 if (hasPending_) {
-                    frame.swap(pending_);
+                    // swap 而非拷贝：pending_ 拿回 outBuf_ 的容量，下次 send 就不用再分配
+                    outBuf_.clear();
+                    pending_.swap(outBuf_);
                     hasPending_ = false;
+                    hasFrame = true;
                 }
             }
-            if (!frame.empty() && !sendFrame(fd, 0x1, frame)) break;
+            if (hasFrame && !sendFrame(fd, 0x1, outBuf_)) break;
             if (!pumpIncoming(fd)) break;
         }
 
         connected_ = false;
+        fd_.store(-1);
         ::close(fd);
         LOGW("disconnected");
-        if (running_.load()) std::this_thread::sleep_for(std::chrono::seconds(1));
+        waitBeforeRetry();
+    }
+}
+
+// 重连前等 1 秒，但停止或换地址时立刻返回
+void WsClient::waitBeforeRetry() {
+    for (int i = 0; i < 10 && running_.load() && !urlDirty_.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }

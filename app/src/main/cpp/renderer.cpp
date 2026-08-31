@@ -11,7 +11,7 @@
 namespace {
 
 constexpr float kNear = 0.05f, kFar = 100.0f;
-constexpr float kGridHalf = 2.5f, kGridStep = 0.5f, kDash = 0.01f, kGap = 0.01f;
+constexpr float kGridHalf = 2.5f, kGridStep = 0.5f, kDash = 0.04f, kGap = 0.04f;
 constexpr float kGridY = -0.003f;  // 略低于 y=0，避开与坐标轴的深度争夺
 
 const char *kVert = R"(#version 300 es
@@ -28,6 +28,22 @@ precision mediump float;
 in vec3 vColor;
 out vec4 outColor;
 void main() { outColor = vec4(vColor, 1.0); }
+)";
+
+const char *kPanelVert = R"(#version 300 es
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec2 aUv;
+uniform mat4 uMvp;
+out vec2 vUv;
+void main() { vUv = aUv; gl_Position = uMvp * vec4(aPos, 1.0); }
+)";
+
+const char *kPanelFrag = R"(#version 300 es
+precision mediump float;
+in vec2 vUv;
+uniform sampler2D uTex;
+out vec4 outColor;
+void main() { outColor = texture(uTex, vUv); }
 )";
 
 GLuint compile(GLenum type, const char *src) {
@@ -173,7 +189,62 @@ bool Renderer::initGl() {
     setupAttribs(vao_, vbo_);
     glGenFramebuffers(1, &fbo_);
     buildGrid();
+
+    GLuint pv = compile(GL_VERTEX_SHADER, kPanelVert), pf = compile(GL_FRAGMENT_SHADER, kPanelFrag);
+    if (pv == 0 || pf == 0) return false;
+    panelProg_ = glCreateProgram();
+    glAttachShader(panelProg_, pv);
+    glAttachShader(panelProg_, pf);
+    glLinkProgram(panelProg_);
+    glDeleteShader(pv);
+    glDeleteShader(pf);
+    uPanelMvp_ = glGetUniformLocation(panelProg_, "uMvp");
+    uPanelTex_ = glGetUniformLocation(panelProg_, "uTex");
+
+    glGenVertexArrays(1, &panelVao_);
+    glGenBuffers(1, &panelVbo_);
+    glBindVertexArray(panelVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, panelVbo_);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float),
+                          reinterpret_cast<void *>(3 * sizeof(float)));
+    glBindVertexArray(0);
+
+    glGenTextures(1, &panelTex_);
+    glBindTexture(GL_TEXTURE_2D, panelTex_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
     return true;
+}
+
+void Renderer::uploadPanel(const void *pixels, int w, int h) {
+    if (panelTex_ == 0 || pixels == nullptr) return;
+    glBindTexture(GL_TEXTURE_2D, panelTex_);
+    if (w != panelW_ || h != panelH_) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        panelW_ = w;
+        panelH_ = h;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void Renderer::setPanelQuad(const XrPosef &pose, float wm, float hm) {
+    const float hw = wm * 0.5f, hh = hm * 0.5f;
+    // Bitmap 原点在左上，所以 v 要翻转
+    const XrVector3f bl = apply(pose, {-hw, -hh, 0}), br = apply(pose, {hw, -hh, 0});
+    const XrVector3f tr = apply(pose, {hw, hh, 0}), tl = apply(pose, {-hw, hh, 0});
+    const float v[] = {bl.x, bl.y, bl.z, 0, 1, br.x, br.y, br.z, 1, 1, tr.x, tr.y, tr.z, 1, 0,
+                       bl.x, bl.y, bl.z, 0, 1, tr.x, tr.y, tr.z, 1, 0, tl.x, tl.y, tl.z, 0, 0};
+    glBindBuffer(GL_ARRAY_BUFFER, panelVbo_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(v), v, GL_DYNAMIC_DRAW);
+    panelQuadSet_ = true;
 }
 
 bool Renderer::init(XrInstance instance, XrSystemId systemId, XrSession session) {
@@ -253,6 +324,10 @@ void Renderer::destroy() {
     }
     targets_.clear();
     if (fbo_ != 0) glDeleteFramebuffers(1, &fbo_);
+    if (panelTex_ != 0) glDeleteTextures(1, &panelTex_);
+    if (panelVbo_ != 0) glDeleteBuffers(1, &panelVbo_);
+    if (panelVao_ != 0) glDeleteVertexArrays(1, &panelVao_);
+    if (panelProg_ != 0) glDeleteProgram(panelProg_);
     if (gridVbo_ != 0) glDeleteBuffers(1, &gridVbo_);
     if (gridVao_ != 0) glDeleteVertexArrays(1, &gridVao_);
     if (vbo_ != 0) glDeleteBuffers(1, &vbo_);
@@ -309,6 +384,22 @@ bool Renderer::render(const std::vector<XrView> &views) {
             glDrawArrays(GL_LINES, 0, dynCount);
         }
         glBindVertexArray(0);
+
+        if (panelVisible_ && panelQuadSet_ && panelW_ > 0) {
+            glEnable(GL_BLEND);
+            // 投影层用的是非预乘 alpha，所以 alpha 通道单独算
+            glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE,
+                                GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(panelProg_);
+            glUniformMatrix4fv(uPanelMvp_, 1, GL_FALSE, mvp);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, panelTex_);
+            glUniform1i(uPanelTex_, 0);
+            glBindVertexArray(panelVao_);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindVertexArray(0);
+            glDisable(GL_BLEND);
+        }
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         if (XR_FAILED(xrReleaseSwapchainImage(t.swapchain, &ri))) return false;

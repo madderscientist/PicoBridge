@@ -25,6 +25,11 @@ public:
 
     bool render(const std::vector<XrView> &views);
 
+    // 面板：Java 画到 Bitmap 后上传成纹理，当作带贴图的四边形画在投影层里
+    void uploadPanel(const void *pixels, int w, int h);
+    void setPanelQuad(const XrPosef &pose, float widthM, float heightM);
+    void showPanel(bool v) { panelVisible_ = v; }
+
     const std::vector<XrCompositionLayerProjectionView> &projectionViews() const { return pviews_; }
 
 private:
@@ -46,4 +51,10 @@ private:
     GLint uMvp_ = -1;
     GLsizei gridCount_ = 0;
     bool ready_ = false;
+
+    GLuint panelProg_ = 0, panelVao_ = 0, panelVbo_ = 0, panelTex_ = 0;
+    GLint uPanelMvp_ = -1, uPanelTex_ = -1;
+    int panelW_ = 0, panelH_ = 0;
+    bool panelVisible_ = false;
+    bool panelQuadSet_ = false;
 };

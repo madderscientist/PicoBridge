@@ -17,6 +17,7 @@ set_target_properties(openxr_loader PROPERTIES
 add_library(${CMAKE_PROJECT_NAME} SHARED
         main.cpp
         renderer.cpp
+        vr_panel.cpp
         ws_client.cpp
         ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
 
@@ -33,7 +34,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
         android
         log
         EGL
-        GLESv3)
+        GLESv3
+        jnigraphics)
 
 # glue 的入口没有被显式引用，不加这个会被链接器裁掉，导致 NativeActivity 起不来
 target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-u" "ANativeActivity_onCreate")

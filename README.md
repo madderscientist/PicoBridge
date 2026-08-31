@@ -4,17 +4,19 @@
 供机器人遥操作、动作采集、算法实验等下游使用。
 
 ```
-PICO 4 Ultra ──── WebSocket (92 Hz) ────► PC: server.py ────► 你的程序
-  头显位姿                                                    /state
-  双眼视图 + FOV                                              /ws/subscribe
-  双手柄：位姿 / 按键 / 触摸 / 摇杆 / 电量                     --forward-url
-  双手 26 关节手势                                            /monitor
+PICO 4 Ultra ──── WebSocket (72/90 Hz) ───► PC: server.py ────► 你的程序
+  头显位姿                                                      /state
+  双眼视图 + FOV                                                /ws/subscribe
+  双手柄：位姿 / 按键 / 触摸 / 摇杆 / 电量                       --forward-url
+  双手 26 关节手势                                              /monitor
   全身 24 关节动捕（5×Motion Tracker）
   眼动注视射线（需硬件支持）
                 ◄──── 手柄震动指令 ────
 ```
 
 头显里显示的是 **AR 透视画面**，并在上面叠加一层调试线框：坐标轴、地面网格、实时骨架。
+
+服务器地址**在头显里用射线 + 虚拟键盘直接改**，不需要 adb，改完会记住。
 
 ---
 
@@ -88,16 +90,33 @@ adb install -r app\build\outputs\apk\debug\app-debug.apk
 
 ### 3. 配置目标地址
 
-默认硬编码为 `ws://192.168.137.63:8000/ws/device`。改地址**不用重新打包**：
+**在头显里直接改，不用 adb、不用重新打包。**
+
+应用启动时会自动连上次用过的地址。连上了配置面板一闪即收，直接进入采集；
+连不上则面板留在眼前等你改：
+
+1. 用**右手柄射线**指向面板，**扳机**点击
+2. 数字键盘输入 `IP:端口`，`ABC` 切字母页（输主机名用），`默认` 一键恢复
+3. 点**「连接」**
+
+右上角圆点是实时连接状态：**绿=已连接，红=未连接**。连上后面板自动收起。
+随时按**左手柄 Menu 键**可以重新唤出。
+
+地址存在应用私有目录的 `server_url.txt`，重启、重装都还在。
+
+> 走 USB 隧道时填 `127.0.0.1:8000`，并在 PC 上执行 `adb reverse tcp:8000 tcp:8000`。
+> 这样 WiFi 只管上网、USB 管数据，互不干扰。
+
+**无头调试**（没戴头显时）仍可用系统属性覆盖，优先级低于面板存的地址：
 
 ```powershell
 adb shell setprop debug.pico.bridge_url   ws://<你的PC-IP>:8000/ws/device
 adb shell setprop debug.pico.bridge_ar    0        # 0=关 AR 透视，回黑底省电
-adb shell setprop debug.pico.bridge_draw  0        # 0=不画调试线框
+adb shell setprop debug.pico.bridge_draw  0        # 0=不画调试线框，也不显示面板
 adb shell setprop debug.pico.bridge_space stage    # local_floor(默认) / local / stage
 ```
 
-改完重启应用生效。
+地址优先级：`server_url.txt` > `debug.pico.bridge_url` > 编译期默认值。改完重启应用生效。
 
 ### 4. 启动
 
@@ -117,13 +136,14 @@ adb logcat -s PicoBridge PicoBridge/gl PicoBridge/ws
 
 ```
 ext: body_tracking2=1 hand_tracking=1 passthrough=1 eye_gaze=1
-system 'PICO 4 Ultra Enterprise HMD', supportsBodyTracking=1 supportsPassthrough=1 supportsEyeGaze=0
+system 'PICO 4 Ultra HMD', supportsBodyTracking=1 supportsPassthrough=1 supportsEyeGaze=0
 blend mode 1, passthrough layer enabled
 passthrough layer ready
 using reference space 1000426000 (LOCAL_FLOOR)
 suggest bindings /interaction_profiles/bytedance/pico4s_controller -> 1
 hand 0 interaction profile: /interaction_profiles/bytedance/pico4s_controller
-renderer ready: 2 views @ 1920x1920, grid 5522 segments
+renderer ready: 2 views @ 1920x1920, grid 1386 segments
+panel ready (bitmap 1024x768)
 session state -> 5                       ← 5 = FOCUSED，正常工作态
 ws: connected
 ```
@@ -139,12 +159,13 @@ ws: connected
 | 双手柄 grip | 12 cm 三轴 |
 | 手势 26 关节 | 橙色小十字（手势激活时才有） |
 | 眼动射线 | 青色 2 m 射线（需硬件支持） |
+| 配置面板 | 正前方 1.5 m、高 1.2 m 处的 1.0×0.75 m 面板，伴青色手柄射线 |
 
 ---
 
 ## 数据长什么样
 
-一帧约 **14.5 KB**，频率约 **92 Hz**（≈1.3 MB/s）。
+一帧约 **6.5 KB**，频率跟随头显刷新率（**72 / 90 Hz**）。
 
 ### 顶层结构
 
@@ -168,8 +189,10 @@ ws: connected
   "hands":    { "left": {...}, "right": {...} },
   "body":     { /* 全身 24 关节 */ },
 
-  "input_sources": [], "tracked_sources": [], "tracker_candidates": [],  // 兼容旧 WebXR schema，恒为空
-  "webxr":  { /* 能力元信息 */ }
+  "caps": {                     // 静态能力位
+    "body_tracking": true, "hand_tracking": true,
+    "eye_gaze": false, "body_joint_count": 24
+  }
 }
 ```
 
@@ -238,13 +261,17 @@ ws: connected
   "left": {
     "active": false,            // ⚠️ 手柄在用时 PICO 会关掉手势追踪，此时恒为 false
     "joint_count": 26,
+    "joints": {}                // active=false 时为空：关节值无意义，发它会白占一半带宽
+  },
+  "right": {
+    "active": true,
+    "joint_count": 26,
     "joints": {
       "PALM":      { "position": [...], "orientation": [...], "radius": 0.0 },
       "INDEX_TIP": { ... },
       ...
     }
-  },
-  "right": { ... }
+  }
 }
 ```
 
@@ -385,136 +412,109 @@ def webxr_to_robot(p):
 
 ## 开发注意点
 
-### AR 透视是怎么实现的 —— 这里踩过坑
+踩过的坑，按重要性排序。
 
-**只把 `environmentBlendMode` 设成 `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND` 再提交 0 个图层，
-结果是纯黑屏。** 虽然 `xrEnumerateEnvironmentBlendModes` 确实会返回 `3`(ALPHA_BLEND)，
-但那条路是给「提交一个带 alpha 通道的投影层」用的，跟纯透视无关。
+### AR 透视：光设 `ALPHA_BLEND` 是黑屏
 
-PICO 的视频透视走的是 Meta 那套 **`XR_FB_passthrough`** —— 摄像头画面由一个**合成层**承载，
-你不提交这个层，合成器就没东西可显示：
+`xrEnumerateEnvironmentBlendModes` 会返回 `3`(ALPHA_BLEND)，但那条路是给「提交带 alpha 的投影层」
+用的。PICO 的视频透视走 Meta 那套 **`XR_FB_passthrough`**：摄像头画面由一个**合成层**承载，
+不提交这个层合成器就没东西可显示。
 
-```cpp
-// 1. 实例扩展里加上 XR_FB_passthrough
-// 2. 建会话后创建透视对象与图层
-XrPassthroughCreateInfoFB pci{XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
-pci.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
-xrCreatePassthroughFB(session, &pci, &passthrough);
+`xrCreatePassthroughFB` → `xrCreatePassthroughLayerFB`(purpose=RECONSTRUCTION) →
+每帧把 `XrCompositionLayerPassthroughFB` 作为合成层提交，混合模式保持 **OPAQUE**。
 
-XrPassthroughLayerCreateInfoFB lci{XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
-lci.passthrough = passthrough;
-lci.flags   = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
-lci.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
-xrCreatePassthroughLayerFB(session, &lci, &passthroughLayer);
+> ⚠️ **`xrCreatePassthroughFB` 在 PICO 透视服务被拖死时会永不返回**，表现为进入应用后画面冻住、
+> 日志停在创建透视那步。反复 `force-stop` 持有透视句柄的进程容易触发。**只能重启头显恢复**；
+> 临时绕过用 `setprop debug.pico.bridge_ar 0`。
 
-// 3. 每帧作为合成层提交，混合模式保持 OPAQUE（画面来自图层，不是来自混合）
-XrCompositionLayerPassthroughFB layer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
-layer.layerHandle = passthroughLayer;
-const XrCompositionLayerBaseHeader *layers[1] = { (XrCompositionLayerBaseHeader *)&layer };
-endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-endInfo.layerCount = 1;
-endInfo.layers = layers;
-```
+### VR 内配置面板：不要用 `XR_KHR_android_surface_swapchain`
 
-本应用**不渲染任何虚拟内容**：EGL 上下文只是为了满足 `xrCreateSession` 的图形绑定要求，
-用的是 16×16 的 pbuffer，没有 swapchain、没有 shader。
+运行时会列出这个扩展、也能成功启用，但 `xrCreateSwapchainAndroidSurfaceKHR` 对**枚举出的全部 70 种
+format × 4 种 usage 组合**都返回 `XR_ERROR_VALIDATION_FAILURE`。
+
+改用：Java 侧 `Canvas` 画进 `Bitmap(ARGB_8888)` → native 用 NDK `jnigraphics` 锁像素 →
+`glTexSubImage2D` 上传 → 在已有的 GLES 投影层里画一个带贴图的四边形。文字仍是 Android 原生渲染，
+还省掉一个合成层。
+
+两个 JNI 陷阱：
+
+- **NativeActivity 用 `dlopen` 加载 .so，不走 `System.loadLibrary`**，所以库不在 ART 的 JNI 库列表里，
+  `native` 回调用动态查找会抛 `UnsatisfiedLinkError`。必须 `RegisterNatives` 显式注册
+- 每次 `CallStaticVoidMethod` 后都要 `ExceptionCheck` + `ExceptionClear`。pending exception 不清，
+  下一次任意 JNI 调用会让 ART 直接 abort，而**崩溃栈指向的是后一次调用**，极易误判位置
 
 ### OpenXR 头文件和 loader 从哪来 —— 不用下 PICO SDK
 
-`XR_BD_body_tracking` 是 ByteDance 私有扩展，Khronos 官方头文件里没有。但不必去
-developer.picoxr.com 下 SDK，**直接从 PICO 的公开仓库取**（Apache-2.0）：
+`XR_BD_body_tracking` 是 ByteDance 私有扩展，Khronos 官方头文件里没有。直接从 PICO 的公开仓库
+`Pico-Developer/SecureMR-Samples` 取（Apache-2.0）：`external/openxr/` 下的头文件和
+arm64-v8a 预编译 loader。loader 只依赖系统库，所以工程能用 `ANDROID_STL=c++_static`。
 
-```
-https://github.com/Pico-Developer/SecureMR-Samples
-  external/openxr/include/openxr/*.h        →  app/src/main/cpp/openxr/include/openxr/
-  external/openxr/lib/libopenxr_loader.so   →  app/src/main/jniLibs/arm64-v8a/
-```
-
-这套头文件包含全部 BD/PICO 私有扩展定义。loader 是 arm64-v8a 预编译的，`readelf -d` 确认它
-只依赖系统库（不需要 `libc++_shared.so`），所以工程用的是 `ANDROID_STL=c++_static`。
-
-**顺带解决了公司网络连不上 Maven Central 的问题** —— 不需要
-`org.khronos.openxr:openxr_loader_for_android` 这个 AAR。
-
-纯 C++ 的调用范例可以参考
-`Pico-Developer/PICO-Unreal-Integration-SDK` 的
-`UE_5.6/Plugins/PICOOpenXR/Source/PICOOpenXRMovement/Private/PICO_BodyTracking.cpp`。
+顺带解决了公司网络连不上 Maven Central 的问题 —— 不需要 `openxr_loader_for_android` 这个 AAR。
 
 ### ⚠️ 不要往 `XrBodyJointLocationsBD.next` 挂 `XrBodyJointVelocitiesPICO`
 
-看起来合法，实际上 **PICO 运行时按 `XrBodyTrackingPostureFlagsDataPICO` 的布局往这个指针写**，
-会踩坏你的速度数组。实测症状：`SPINE1` 的 `linear_velocity[0]` 出现 `5392344.0` 这种
-明显是 displayTime 毫秒数的垃圾值，其余关节全是 0 —— 这是栈内存被越界写了。
+看着合法，实际上 **PICO 运行时按 `XrBodyTrackingPostureFlagsDataPICO` 的布局往这个指针写**，
+会踩坏你的速度数组（实测 `SPINE1` 出现 displayTime 毫秒数那样的垃圾值）。需要速度就自己对位置做差分。
 
-需要速度就自己对位置做差分。官方样例在 `next` 上挂的是 posture flags，不是 velocities。
+### 参考空间：用 `LOCAL_FLOOR`，别用 `STAGE`
 
-### 手柄绑定
-
-PICO 4 Ultra 的交互配置文件是 `/interaction_profiles/bytedance/pico4s_controller`
-（注意 `pico4_controller` 是给 PICO 4 用的，不是 Ultra）。绑定路径的权威来源是
-`Pico-Developer/PICO-Unity-OpenXR-SDK` 的 `Runtime/Interactions/PICO4UltraControllerProfile.cs`。
-
-**`xrSuggestInteractionProfileBindings` 是原子的** —— 只要有一条路径该 profile 不认，
-整包建议都会被拒，表现为所有按键都读不到。本工程的做法是先试全量集合，失败再退到核心集合，
-并且对 pico4s / pico4 / pico_neo3 三个 profile 各建议一遍。
-
-`/input/system/click` 通常被运行时保留，不要绑。
-
-### 帧率
-
-只在 `frameState.shouldRender == XR_TRUE` 时才发帧，会掉到约 10 Hz —— 因为头显未佩戴或不可见时
-运行时会节流。**无条件发帧**（位姿数据此时依然有效）可以稳定在 92 Hz。
-
-### 参考空间选错了，长按 Home 就不会重置
-
-`STAGE` 的原点绑定在安全区（Guardian）的**物理中心**，长按 Home 的「重置视角」对它**无效**；
-用了它就会出现"别的应用能重置，这个不能"的现象。
-
-要和 WebXR 的 `local-floor` 行为一致，得用 `XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR`
-（OpenXR 1.0 下需启用 `XR_EXT_local_floor` 扩展）。重置时运行时会发
-`XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING`，但 **`XrSpace` 句柄不用重建**，
-原点由运行时自己切换。
+`STAGE` 的原点绑在安全区物理中心，长按 Home 的「重置视角」对它**无效** —— 会出现"别的应用能重置、
+这个不能"的现象。要和 WebXR 的 `local-floor` 行为一致，用
+`XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR`（需 `XR_EXT_local_floor`）。重置时 `XrSpace` 句柄不用重建。
 
 ### ⚠️ `xrWaitSwapchainImage` 不要用 `XR_INFINITE_DURATION`
 
-头显未佩戴时 `shouldRender=false`，合成器不消费 swapchain 图像，无限等待会**直接死锁**，
-表现为帧率掉到 0。用有限超时（本项目 100 ms），超时就释放并跳过这一帧。
+头显未佩戴时 `shouldRender=false`，合成器不消费图像，无限等待会**直接死锁**（帧率掉 0）。
+用有限超时（本项目 100 ms）。同时按规范：`shouldRender=false` 时不应提交任何合成层，也别碰 swapchain。
 
-同时按规范：`shouldRender=false` 时**不应提交任何合成层**，也不该去碰 swapchain。
+另外，**头显息屏时 `renderer_.init()` 会卡在创建 swapchain**，看着像死循环 ——
+先查 `adb shell dumpsys power` 里的 `mWakefulness` 再怀疑代码。
 
-### 线框叠加层
+### 手柄绑定是原子的
 
-`renderer.cpp` 是个只画线段的轻量渲染器：
+PICO 4 Ultra 的配置文件是 `/interaction_profiles/bytedance/pico4s_controller`
+（`pico4_controller` 是 PICO 4 的）。绑定路径见
+`PICO-Unity-OpenXR-SDK` 的 `Runtime/Interactions/PICO4UltraControllerProfile.cs`。
 
-- 底层是透视层，线框走**带 alpha 的投影层**叠在上面，
-  flags = `BLEND_TEXTURE_SOURCE_ALPHA | UNPREMULTIPLIED_ALPHA`，
-  片段着色器输出 alpha=1，未绘制处 `glClearColor(0,0,0,0)` 透出真实画面
-- **地面网格是静态的，只在 init 时建一次放独立 VBO**。虚线密度高时段数可达 5000+，
-  每帧重建会白白产生数百 KB 的拷贝与上传
-- 每视图 2 个 draw call：网格 `glLineWidth(1)`、图元 `glLineWidth(4)`
-  （本机 `GL_ALIASED_LINE_WIDTH_RANGE` 是 1.0~8.0，很多 GLES 设备会被钳死在 1.0）
-- 网格下沉到 `y = -0.003`，否则会和 y=0 的 X/Z 轴发生深度争夺，看着像穿模
+**只要有一条路径该 profile 不认，整包建议都会被拒**，表现为所有按键都读不到。本工程先试全量、
+失败退核心集。`/input/system/click` 通常被运行时保留，不要绑。
+
+### 性能与能耗
+
+- **省电的大头是 WiFi 发包量，不是 GPU**。手柄在用时手势追踪被关掉，26×2 个关节全是无效值，
+  照发白占约 7.8 KB/帧。`active=false` 时只发 `"joints":{}`，负载 14.5 KB → 6.5 KB
+- 每帧新建 JSON 字符串 = 90 Hz 下约 4 MB/s 的分配器抖动。复用成员缓冲区；
+  `WsClient::send` 收 `const&` 并拷进已有容量；工作线程用 `pending_.swap(outBuf_)`
+  而不是 swap 到局部变量，否则 `pending_` 每帧丢失容量
+- 只在 `shouldRender==true` 时发帧会掉到约 10 Hz（运行时节流）。**无条件发帧**才能满速
+- 地面网格静态、只在 init 时建一次放独立 VBO；虚线段太密没意义，`kDash/kGap` 用 0.04
+  （5522 段 → 1386 段）
 
 ### WebSocket 客户端
 
-`ws_client.cpp` 是手写的极简实现（约 250 行，仅 ws://，无 TLS），要点：
+手写的极简实现（仅 ws://，无 TLS）：
 
-- 独立线程收发，`send()` **只保留最新一帧**，网络拥塞时丢旧帧，绝不阻塞 OpenXR 主循环
-- 客户端发出的帧**必须加掩码**，这是 RFC 6455 的硬性要求
-- **必须响应服务端的 ping**（`server.py` 里 `heartbeat=20`），否则连接会被判超时踢掉
-- 断线自动重连，退避 1 秒
+- 独立线程收发，`send()` **只保留最新一帧**，拥塞时丢旧帧，绝不阻塞 OpenXR 主循环
+- 客户端发出的帧**必须加掩码**；**必须响应服务端 ping**（`server.py` 里 `heartbeat=20`）
+- **换地址不能在渲染线程 `stop()`+`start()`** —— `stop()` 会 `join()` 正阻塞在 `::connect`
+  的工作线程，对不可达地址要等满 TCP SYN 超时（约 2 分钟），整个画面就此冻住。
+  改成 `setUrl()`：只交给工作线程并 `shutdown()` 当前 socket 打断它，不 join
+- `connect` 用非阻塞 + `poll` 3 秒超时；握手加 `SO_RCVTIMEO` 兜底
 
 ### 其他
 
 - Manifest 里 `pvr.app.type=vr` 和 `org.khronos.openxr.intent.category.IMMERSIVE_HMD` 都是必需的
 - 明文 `ws://` 需要 `android:usesCleartextTraffic="true"`
-- `android_native_app_glue` 的入口没有被显式引用，CMake 里必须加
-  `-u ANativeActivity_onCreate`，否则会被链接器裁掉、应用起不来
+- CMake 必须加 `-u ANativeActivity_onCreate`，否则 glue 入口会被链接器裁掉、应用起不来
+- **包内只能有一个 Activity**。PICO 会把包内 Activity 都标成 VR Activity，多声明一个会让它
+  选不出启动项，报「Activity class does not exist」
+- **头显没外网时 PICO 会拦截自编译应用**：要么弹「本地缓存中没有权限信息」，要么**静默拒绝**
+  （`ActivityTaskManager: result code=-91`），表现为误导性的「Activity 不存在」。
+  判据：先 `adb shell ping -c 2 223.5.5.5`
+- **开发者模式必须在 PICO 设置界面里开**，AOSP 的 `settings put global development_settings_enabled 1`
+  无效。没开的话应用装上了也不出现在启动器里
 - **adb 只留一个 server**。Android Studio 一旦运行就会在 5037 自己拉一个，
-  如果你还手动开了别的端口，两个 server 会抢同一个 USB 设备，症状是两边都看不到头显。
-  解决：`Get-Process adb | Stop-Process -Force` 之后只启动一个
-- 头显 USB 容易整个从 Windows 消失（`Get-PnpDevice -PresentOnly` 里 VID_2D40 一个都没有）。
-  不影响数据 —— 数据链路走局域网，USB 只用于装包和 logcat
+  两个 server 会抢同一个 USB 设备，症状是两边都看不到头显
 
 ---
 
@@ -537,13 +537,16 @@ PICO 4 Ultra 的交互配置文件是 `/interaction_profiles/bytedance/pico4s_co
 ```
 PicoBridge/
 ├─ app/src/main/
-│  ├─ AndroidManifest.xml              NativeActivity + PICO VR 声明
+│  ├─ AndroidManifest.xml              NativeActivity + PICO VR 声明（只能有一个 Activity）
 │  ├─ cpp/
 │  │  ├─ CMakeLists.txt
 │  │  ├─ main.cpp                      OpenXR 会话、全部数据采集、AR 透视
-│  │  ├─ renderer.{h,cpp}              线框叠加层（坐标轴/网格/骨架）
+│  │  ├─ renderer.{h,cpp}              线框叠加层 + 面板贴图四边形
+│  │  ├─ vr_panel.{h,cpp}              VR 内配置面板（射线命中 + Bitmap 上传）
 │  │  ├─ ws_client.{h,cpp}             极简 WebSocket 客户端
 │  │  └─ openxr/include/openxr/*.h     PICO 版 OpenXR 头文件（含 BD 私有扩展）
+│  ├─ java/com/madderscientist/picobridge/
+│  │  └─ VrPanel.java                  面板绘制与虚拟键盘（纯 Canvas，不接 View 框架）
 │  └─ jniLibs/arm64-v8a/
 │     └─ libopenxr_loader.so           PICO 预编译 loader
 └─ app/build.gradle.kts                注意 ndkVersion / cmake version 要与本机一致

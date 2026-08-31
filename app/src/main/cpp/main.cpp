@@ -29,6 +29,7 @@
 
 #include "ws_client.h"
 #include "renderer.h"
+#include "vr_panel.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "PicoBridge", __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "PicoBridge", __VA_ARGS__)
@@ -72,6 +73,33 @@ std::string systemProp(const char *key, const std::string &fallback) {
     char buf[PROP_VALUE_MAX] = {};
     int n = __system_property_get(key, buf);
     return (n > 0) ? std::string(buf, static_cast<size_t>(n)) : fallback;
+}
+
+// 地址优先级：2D 配置页写的文件 > 系统属性 > 编译期默认值
+std::string serverUrl(android_app *app) {
+    if (app->activity->internalDataPath != nullptr) {
+        const std::string path = std::string(app->activity->internalDataPath) + "/server_url.txt";
+        if (FILE *f = std::fopen(path.c_str(), "rb")) {
+            char buf[256] = {};
+            const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+            std::fclose(f);
+            std::string url(buf, n);
+            while (!url.empty() && (url.back() == '\n' || url.back() == '\r' || url.back() == ' ')) {
+                url.pop_back();
+            }
+            if (!url.empty()) return url;
+        }
+    }
+    return systemProp("debug.pico.bridge_url", "ws://192.168.137.63:8000/ws/device");
+}
+
+void saveServerUrl(const std::string &dataPath, const std::string &url) {
+    if (dataPath.empty()) return;
+    const std::string path = dataPath + "/server_url.txt";
+    if (FILE *f = std::fopen(path.c_str(), "wb")) {
+        std::fwrite(url.data(), 1, url.size(), f);
+        std::fclose(f);
+    }
 }
 
 void appendPose(std::string &out, const XrPosef &pose, XrSpaceLocationFlags flags) {
@@ -131,6 +159,7 @@ private:
     bool initEgl();
     bool createInstance(android_app *app);
     bool createSession();
+    void createPassthrough();
     bool createActions();
     void applyPendingHaptic();
     void onServerMessage(const std::string &text);
@@ -138,8 +167,8 @@ private:
     void appendControllers(std::string &json, XrTime t);
     void appendHands(std::string &json, XrTime t);
     void appendBody(std::string &json, XrTime t);
-    void appendViews(std::string &json, XrTime t);
-    std::string buildFrameJson(const XrFrameState &frameState);
+    void appendViews(std::string &json);
+    void buildFrameJson(const XrFrameState &frameState, std::string &out);
 
     XrInstance instance_ = XR_NULL_HANDLE;
     XrSystemId systemId_ = XR_NULL_SYSTEM_ID;
@@ -223,11 +252,17 @@ private:
 
     WsClient ws_;
     uint64_t seq_ = 0;
+    std::string jsonBuf_;  // 复用缓冲区，避免每帧 48KB 的堆分配
 
     Renderer renderer_;
     bool wantDraw_ = true;
     std::vector<XrView> views_;
     bool viewsValid_ = false;
+
+    VrPanel panel_;
+    bool lastMenu_ = false;
+    bool awaitingConnect_ = false;
+    std::string dataPath_;
 
     std::mutex hapticMtx_;
     bool hapticPending_ = false;
@@ -609,6 +644,8 @@ bool Bridge::createSession() {
     spaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     XR_CHECK(xrCreateReferenceSpace(session_, &spaceInfo, &viewSpace_));
 
+    createPassthrough();
+
     XrBodyTrackerCreateInfoBD trackerInfo{XR_TYPE_BODY_TRACKER_CREATE_INFO_BD};
     trackerInfo.jointSet = XR_BODY_JOINT_SET_FULL_BODY_JOINTS_BD;
     XR_CHECK(pfnCreateBodyTracker_(session_, &trackerInfo, &bodyTracker_));
@@ -625,33 +662,34 @@ bool Bridge::createSession() {
         }
     }
 
-    if (pfnCreatePassthrough_ != nullptr && pfnCreatePassthroughLayer_ != nullptr) {
-        XrPassthroughCreateInfoFB pci{XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
-        pci.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
-        XrResult r = pfnCreatePassthrough_(session_, &pci, &passthrough_);
-        if (XR_SUCCEEDED(r)) {
-            XrPassthroughLayerCreateInfoFB lci{XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
-            lci.passthrough = passthrough_;
-            lci.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
-            lci.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
-            r = pfnCreatePassthroughLayer_(session_, &lci, &passthroughLayer_);
-            if (XR_FAILED(r)) {
-                LOGE("xrCreatePassthroughLayerFB failed: %d", static_cast<int>(r));
-                passthroughLayer_ = XR_NULL_HANDLE;
-            }
-        } else {
-            LOGE("xrCreatePassthroughFB failed: %d", static_cast<int>(r));
-            passthrough_ = XR_NULL_HANDLE;
-        }
-        if (pfnPassthroughStart_ != nullptr && passthrough_ != XR_NULL_HANDLE) {
-            pfnPassthroughStart_(passthrough_);
-        }
-        if (pfnPassthroughLayerResume_ != nullptr && passthroughLayer_ != XR_NULL_HANDLE) {
-            pfnPassthroughLayerResume_(passthroughLayer_);
-        }
-        LOGI("passthrough layer %s", passthroughLayer_ != XR_NULL_HANDLE ? "ready" : "unavailable");
-    }
     return createActions();
+}
+
+void Bridge::createPassthrough() {
+    if (pfnCreatePassthrough_ == nullptr || pfnCreatePassthroughLayer_ == nullptr) return;
+    XrPassthroughCreateInfoFB pci{XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
+    pci.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
+    // 这个调用在 PICO 的透视服务被拖死时会永不返回，只能重启头显恢复
+    XrResult r = pfnCreatePassthrough_(session_, &pci, &passthrough_);
+    if (XR_FAILED(r)) {
+        LOGE("xrCreatePassthroughFB failed: %d", static_cast<int>(r));
+        passthrough_ = XR_NULL_HANDLE;
+        return;
+    }
+    XrPassthroughLayerCreateInfoFB lci{XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
+    lci.passthrough = passthrough_;
+    lci.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
+    lci.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
+    r = pfnCreatePassthroughLayer_(session_, &lci, &passthroughLayer_);
+    if (XR_FAILED(r)) {
+        LOGE("xrCreatePassthroughLayerFB failed: %d", static_cast<int>(r));
+        passthroughLayer_ = XR_NULL_HANDLE;
+    }
+    if (pfnPassthroughStart_ != nullptr) pfnPassthroughStart_(passthrough_);
+    if (pfnPassthroughLayerResume_ != nullptr && passthroughLayer_ != XR_NULL_HANDLE) {
+        pfnPassthroughLayerResume_(passthroughLayer_);
+    }
+    LOGI("passthrough layer %s", passthroughLayer_ != XR_NULL_HANDLE ? "ready" : "unavailable");
 }
 
 bool Bridge::init(android_app *app) {
@@ -664,13 +702,30 @@ bool Bridge::init(android_app *app) {
         LOGW("renderer init failed, continuing without overlay");
     }
 
+    const std::string url = serverUrl(app);
+    if (app->activity->internalDataPath != nullptr) dataPath_ = app->activity->internalDataPath;
+    if (wantDraw_) {
+        // 从 ws://host/path 里剥出 host 部分喂给面板
+        std::string host = url;
+        const std::string prefix = "ws://";
+        if (host.compare(0, prefix.size(), prefix) == 0) host = host.substr(prefix.size());
+        const size_t slash = host.find('/');
+        if (slash != std::string::npos) host = host.substr(0, slash);
+        if (!panel_.init(app, appSpace_, host, &renderer_)) {
+            LOGW("vr panel init failed");
+        }
+    }
+
     ws_.setOnText([this](const std::string &text) { onServerMessage(text); });
-    ws_.start(systemProp("debug.pico.bridge_url", "ws://192.168.137.63:8000/ws/device"));
+    ws_.start(url);
+    // 记住的地址能连上就自动收起面板；连不上则留在眼前等用户改
+    awaitingConnect_ = true;
     return true;
 }
 
 void Bridge::shutdown() {
     ws_.stop();
+    panel_.destroy();
     renderer_.destroy();
     if (passthroughLayer_ != XR_NULL_HANDLE && pfnDestroyPassthroughLayer_ != nullptr) {
         pfnDestroyPassthroughLayer_(passthroughLayer_);
@@ -888,6 +943,12 @@ void Bridge::appendHands(std::string &json, XrTime t) {
         std::snprintf(buf, sizeof(buf), "{\"active\":%s,\"joint_count\":%u,\"joints\":{",
                       locations.isActive == XR_TRUE ? "true" : "false", locations.jointCount);
         json += buf;
+        // 手柄在用时 PICO 会关掉手势追踪，此时 26 个关节全是无效值，
+        // 再序列化白白占掉一半带宽（约 7.8KB/帧）
+        if (locations.isActive != XR_TRUE) {
+            json += "}}";
+            continue;
+        }
         for (uint32_t i = 0; i < XR_HAND_JOINT_COUNT_EXT; ++i) {
             if (i > 0) json += ',';
             json += '"';
@@ -897,8 +958,7 @@ void Bridge::appendHands(std::string &json, XrTime t) {
             json.pop_back();
             std::snprintf(buf, sizeof(buf), ",\"radius\":%.5f}", joints[i].radius);
             json += buf;
-            if (locations.isActive == XR_TRUE &&
-                (joints[i].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+            if (joints[i].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) {
                 renderer_.addCross(joints[i].pose.position, 0.008f, 1.0f, 0.85f, 0.2f);
             }
         }
@@ -967,8 +1027,7 @@ void Bridge::appendBody(std::string &json, XrTime t) {
     json += "}},";
 }
 
-void Bridge::appendViews(std::string &json, XrTime t) {
-    (void)t;
+void Bridge::appendViews(std::string &json) {
     json += "\"views\":[";
     if (viewsValid_) {
         char buf[256];
@@ -987,10 +1046,9 @@ void Bridge::appendViews(std::string &json, XrTime t) {
     json += "],";
 }
 
-std::string Bridge::buildFrameJson(const XrFrameState &frameState) {
+void Bridge::buildFrameJson(const XrFrameState &frameState, std::string &json) {
     const XrTime t = frameState.predictedDisplayTime;
-    std::string json;
-    json.reserve(48 * 1024);
+    json.clear();
 
     char buf[512];
     std::snprintf(buf, sizeof(buf),
@@ -1031,24 +1089,18 @@ std::string Bridge::buildFrameJson(const XrFrameState &frameState) {
     if (!gazeWritten) json += "null";
     json += ',';
 
-    appendViews(json, t);
+    appendViews(json);
     appendControllers(json, t);
     appendHands(json, t);
     appendBody(json, t);
 
     std::snprintf(buf, sizeof(buf),
-                  "\"input_sources\":[],\"tracked_sources\":[],\"tracker_candidates\":[],"
-                  "\"webxr\":{\"source\":\"openxr\",\"tracked_sources_api\":false,"
-                  "\"tracked_sources_feature\":false,\"body_api\":true,"
-                  "\"body_tracking_feature\":%s,\"body_joint_count\":%d,"
-                  "\"hand_tracking\":%s,\"eye_gaze\":%s,\"input_source_count\":2,"
-                  "\"tracked_source_count\":null,"
-                  "\"user_agent\":\"PicoBridge/2.0 XR_BD_body_tracking\"}}",
-                  supportsBodyTracking_ ? "true" : "false", XR_BODY_JOINT_COUNT_BD,
+                  "\"caps\":{\"body_tracking\":%s,\"hand_tracking\":%s,\"eye_gaze\":%s,"
+                  "\"body_joint_count\":%d}}",
+                  supportsBodyTracking_ ? "true" : "false",
                   hasHandTracking_ ? "true" : "false",
-                  eyeGazeSpace_ != XR_NULL_HANDLE ? "true" : "false");
+                  eyeGazeSpace_ != XR_NULL_HANDLE ? "true" : "false", XR_BODY_JOINT_COUNT_BD);
     json += buf;
-    return json;
 }
 
 void Bridge::tick() {
@@ -1059,6 +1111,14 @@ void Bridge::tick() {
     XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
     xrBeginFrame(session_, &beginInfo);
 
+    // 必须先于下面任何 add* 调用，它会清空上一帧的顶点
+    renderer_.beginFrame();
+    if (renderer_.ready()) {
+        const XrPosef origin{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+        renderer_.addAxes(origin, 0.5f);                    // +X 红 / +Y 绿 / +Z 蓝
+        renderer_.addRay(origin, 1.0f, 1.0f, 0.9f, 0.15f);  // -Z 黄：正前方
+    }
+
     if (focused_) {
         XrActiveActionSet active{actionSet_, XR_NULL_PATH};
         XrActionsSyncInfo syncInfo{XR_TYPE_ACTIONS_SYNC_INFO};
@@ -1066,6 +1126,46 @@ void Bridge::tick() {
         syncInfo.activeActionSets = &active;
         xrSyncActions(session_, &syncInfo);
         applyPendingHaptic();
+
+        // 菜单键切换配置面板
+        XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+        gi.action = aMenu_;
+        gi.subactionPath = handPath_[kLeft];
+        XrActionStateBoolean menu{XR_TYPE_ACTION_STATE_BOOLEAN};
+        xrGetActionStateBoolean(session_, &gi, &menu);
+        const bool menuNow = menu.currentState == XR_TRUE;
+        if (menuNow && !lastMenu_) panel_.toggle();
+        lastMenu_ = menuNow;
+
+        // 右手射线操作面板
+        if (panel_.visible()) {
+            gi.action = aTrigger_;
+            gi.subactionPath = handPath_[kRight];
+            XrActionStateFloat trigger{XR_TYPE_ACTION_STATE_FLOAT};
+            xrGetActionStateFloat(session_, &gi, &trigger);
+
+            XrSpaceLocation aim{XR_TYPE_SPACE_LOCATION};
+            const bool ok =
+                XR_SUCCEEDED(xrLocateSpace(aimSpace_[kRight], appSpace_,
+                                           frameState.predictedDisplayTime, &aim)) &&
+                (aim.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0;
+            panel_.update(aim.pose, ok, trigger.currentState > 0.6f, ws_.connected());
+            if (ok) renderer_.addRay(aim.pose, 3.0f, 0.2f, 1.0f, 0.6f);
+        }
+    }
+
+    // 用户在面板上确认了新地址就重连
+    std::string newUrl;
+    if (VrPanel::consumeUrl(&newUrl)) {
+        LOGI("switching to %s", newUrl.c_str());
+        ws_.setUrl(newUrl);
+        saveServerUrl(dataPath_, newUrl);
+        awaitingConnect_ = true;
+    }
+    // 连上了再收面板，否则用户看不到连接结果
+    if (awaitingConnect_ && ws_.connected()) {
+        awaitingConnect_ = false;
+        panel_.setVisible(false);
     }
 
     // 视图位姿每帧只定位一次，JSON 与叠加层渲染共用
@@ -1082,15 +1182,9 @@ void Bridge::tick() {
                   (viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0 &&
                   (viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
 
-    renderer_.beginFrame();
-    if (renderer_.ready()) {
-        const XrPosef origin{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
-        renderer_.addAxes(origin, 0.5f);                    // +X 红 / +Y 绿 / +Z 蓝
-        renderer_.addRay(origin, 1.0f, 1.0f, 0.9f, 0.15f);  // -Z 黄：正前方
-    }
-
     // 即使 shouldRender 为假也照发：位姿数据依然有效，消费端不该断流
-    ws_.send(buildFrameJson(frameState));
+    buildFrameJson(frameState, jsonBuf_);
+    ws_.send(jsonBuf_);
     ++seq_;
 
     // shouldRender 为假时规范要求不提交任何合成层，也不要碰 swapchain
@@ -1109,7 +1203,7 @@ void Bridge::tick() {
     projectionLayer.viewCount = static_cast<uint32_t>(renderer_.projectionViews().size());
     projectionLayer.views = renderer_.projectionViews().data();
 
-    // 透视层在底，带 alpha 的线框投影层叠在上面
+    // 透视层在底，线框+配置面板都画在投影层里
     const XrCompositionLayerBaseHeader *layers[2];
     uint32_t layerCount = 0;
     if (render && passthroughLayer_ != XR_NULL_HANDLE) {
