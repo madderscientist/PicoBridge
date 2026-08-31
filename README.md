@@ -74,8 +74,7 @@ pip install -r requirements.txt
 python server.py
 ```
 
-服务只跑 HTTP（APK 走明文 `ws://`）。记下本机局域网 IP，并确保 8000 端口的入站防火墙规则已放行。
-详见 [pc/README.md](pc/README.md)。
+连法（WiFi / USB 隧道）、命令行参数、防火墙配置见 [pc/README.md](pc/README.md)。
 
 ### 2. 构建并安装
 
@@ -99,10 +98,8 @@ adb install -r app\build\outputs\apk\debug\app-debug.apk
 右上角圆点是实时连接状态：**绿=已连接，红=未连接**。连上后面板自动收起。
 随时按**左手柄 Menu 键**可以重新唤出。
 
-地址存在应用私有目录的 `server_url.txt`，重启、重装都还在。
-
-> 走 USB 隧道时填 `127.0.0.1:8000`，并在 PC 上执行 `adb reverse tcp:8000 tcp:8000`。
-> 这样 WiFi 只管上网、USB 管数据，互不干扰。
+地址存在应用私有目录的 `server_url.txt`，重启、重装都还在。填什么地址取决于连法，
+见 [pc/README.md](pc/README.md#两种连法)。
 
 **无头调试**（没戴头显时）仍可用系统属性覆盖，优先级低于面板存的地址：
 
@@ -113,7 +110,7 @@ adb shell setprop debug.pico.bridge_draw  0        # 0=不画调试线框，也�
 adb shell setprop debug.pico.bridge_space stage    # local_floor(默认) / local / stage
 ```
 
-地址优先级：`server_url.txt` > `debug.pico.bridge_url` > 编译期默认值。改完重启应用生效。
+上述地址优先级：`server_url.txt` > `debug.pico.bridge_url` > 编译期默认值。改完重启应用生效。
 
 ### 4. 启动
 
@@ -339,71 +336,10 @@ LITTLE_METACARPAL LITTLE_PROXIMAL LITTLE_INTERMEDIATE LITTLE_DISTAL LITTLE_TIP
 
 ## 怎么取数据
 
-四种方式，任选。前提是 `server.py` 已在跑。
+服务端跑起来后有四条路：`GET /state` 轮询、`WS /ws/subscribe` 订阅、`--forward-url` 定频转发、
+`GET /monitor` 浏览器面板；反向通道 `POST /haptic` 让手柄震动。
 
-### 1. HTTP 轮询最新一帧
-
-```python
-import json, urllib.request
-
-with urllib.request.urlopen("http://192.168.137.63:8000/state") as r:
-    frame = json.load(r)
-
-print(frame["body"]["joints"]["LEFT_WRIST"]["position"])
-```
-
-仓库里的 `../VR/check_body.py` 就是个现成的例子，跑一下能把所有字段打一遍。
-
-### 2. WebSocket 实时订阅（推荐）
-
-```python
-import aiohttp, asyncio, json
-
-async def main():
-    async with aiohttp.ClientSession() as s:
-        async with s.ws_connect("ws://192.168.137.63:8000/ws/subscribe") as ws:
-            async for msg in ws:
-                frame = json.loads(msg.data)
-                if frame["right"]["buttons"]["trigger"] > 0.5:
-                    print(frame["right"]["grip"]["position"])
-
-asyncio.run(main())
-```
-
-消费端跟不上时服务端会**丢旧帧**而不是堆积，不用担心内存爆掉。
-
-### 3. 让服务端定频推给你
-
-```powershell
-python server.py --forward-url http://<你的服务>/ingest --forward-hz 30
-```
-
-### 4. 浏览器面板
-
-PC 上打开 `http://192.168.137.63:8000/monitor` 看实时状态。
-
-### 反向通道：让手柄震动
-
-```python
-import urllib.request, json
-
-urllib.request.urlopen(urllib.request.Request(
-    "http://192.168.137.63:8000/haptic",
-    data=json.dumps({"hand": "right", "intensity": 0.6, "duration": 80}).encode(),
-    headers={"Content-Type": "application/json"}))
-```
-
-指令经同一条 WebSocket 回到 APK，最终调 `xrApplyHapticFeedback`。
-
-### 坐标系转换
-
-`../VR/example_consumer.py` 里有个现成的转换，OpenXR/WebXR → 常见机器人基坐标系（X 前 / Y 左 / Z 上）：
-
-```python
-def webxr_to_robot(p):
-    x, y, z = p
-    return (-z, -x, y)
-```
+可运行的代码、命令行参数、坐标系转换都在 **[pc/README.md](pc/README.md)**。
 
 ---
 

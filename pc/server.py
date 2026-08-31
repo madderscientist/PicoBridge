@@ -44,13 +44,10 @@ class Hub:
         self.state: dict = dict(EMPTY_STATE)
         self.subscribers: set[web.WebSocketResponse] = set()
         self.devices: set[web.WebSocketResponse] = set()
-        self.updated = asyncio.Event()
 
     def publish(self, frame: dict) -> None:
         frame["recv_time"] = time.time()
         self.state = frame
-        self.updated.set()
-        self.updated.clear()
         if not self.subscribers:
             return
         text = json.dumps(frame, separators=(",", ":"))
@@ -137,7 +134,7 @@ async def ws_device(request: web.Request) -> web.StreamResponse:
 
 
 async def ws_subscribe(request: web.Request) -> web.StreamResponse:
-    """机器人端下行：实时订阅每一帧。"""
+    """下游消费端：实时订阅每一帧。"""
     _check_token(request)
     hub: Hub = request.app["hub"]
     ws = web.WebSocketResponse(heartbeat=20)
@@ -145,15 +142,8 @@ async def ws_subscribe(request: web.Request) -> web.StreamResponse:
     hub.subscribers.add(ws)
     print("[subscriber] connected")
     try:
-        async for msg in ws:
-            if msg.type is aiohttp.WSMsgType.TEXT:
-                # 订阅方也可以经此通道请求震动
-                try:
-                    payload = json.loads(msg.data)
-                except json.JSONDecodeError:
-                    continue
-                if payload.get("type") == "haptic":
-                    await hub.to_devices(payload)
+        async for _ in ws:  # 单向推送，上行消息忽略；震动走 POST /haptic
+            pass
     finally:
         hub.subscribers.discard(ws)
         print("[subscriber] disconnected")

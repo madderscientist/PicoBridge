@@ -10,6 +10,9 @@ PICO 4 Ultra ──ws──► server.py ──┬── GET  /state          �
                      ◄──POST /haptic── 手柄震动
 ```
 
+> 本文只讲**消费端**。设备端（构建 APK、VR 内配置面板、数据字段含义、OpenXR 开发坑）
+> 见 [根目录 README](../README.md)。
+
 ---
 
 ## 快速开始
@@ -46,7 +49,6 @@ Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.PrefixOrigin -ne 'WellK
 New-NetFirewallRule -DisplayName "VR Bridge 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
 ```
 
-> 公司有线网通常做了客户端隔离，头显到不了 PC。用手机热点或路由器把两者放在同一网段最省事。
 
 ### B. USB 隧道（开发调试用）
 
@@ -112,7 +114,9 @@ python server.py --forward-url http://127.0.0.1:9000/frame --forward-hz 30
 ### 4. 浏览器面板
 
 <http://127.0.0.1:8000/monitor> —— 头显/手柄实时数值、可拖拽旋转的 24 关节骨架、原始 JSON。
-完整的字段说明见[根目录 README](../README.md#数据长什么样)。
+
+> 字段含义（各关节名、按键、`body.status` 取值等）见
+> [根目录 README](../README.md#数据长什么样)。消费端跟不上时服务端**丢旧帧**而不是堆积。
 
 ---
 
@@ -146,16 +150,14 @@ python check_body.py http://192.168.1.20:8000/state # 或指定地址
 
 ---
 
-## 坐标系
+## 坐标系转换
 
-OpenXR 右手系，**Y 轴向上，−Z 为正前方**，参考空间默认 `LOCAL_FLOOR`（原点在地面，
-长按 Home 会跟着重置）。转到常见的机器人坐标系（X 前 / Y 左 / Z 上）：
+帧里的位姿是 OpenXR 右手系（Y 上、−Z 前），详见
+[根目录 README 的位姿对象一节](../README.md#位姿对象)。转到常见机器人基坐标系（X 前 / Y 左 / Z 上）：
 
 ```python
-def to_robot(p):
+def xr_to_robot(p):
     return (-p[2], -p[0], p[1])
 ```
 
-⚠️ `LOCAL_FLOOR` 的坐标**不是房间绝对坐标** —— 用户一重置视角，所有坐标会整体跳变。
-做长时间轨迹记录时要么监听重置、要么在头显上切到 `STAGE`
-（`adb shell setprop debug.pico.bridge_space stage`）。
+完整例子在 `example_consumer.py`：按住右手柄扳机锁定参考原点，输出增量位移。
